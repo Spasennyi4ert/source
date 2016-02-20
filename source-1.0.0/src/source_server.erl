@@ -24,12 +24,13 @@
 }).
 
 start_link(Feed, SecID) ->
-    gen_server:start_link({global, ?MODULE}, [Feed, SecID], []).
+    gen_server:start_link(?MODULE, [Feed, SecID], []).
 
 stop(Feed) ->
-    gen_server:call({global, ?MODULE}, {stop, Feed}).
+    gen_server:call(?MODULE, {stop, Feed}).
 
 init([Feed, SecID]) ->
+    SendTo = global:whereis_name(fast_dispatcher),
     {ok, Options} = application:get_env(source, Feed),
     {source, Source} = lists:keyfind(source, 1, Options),
     {port, Port} = lists:keyfind(port, 1, Options),
@@ -52,7 +53,7 @@ init([Feed, SecID]) ->
 
     ok = gen_udp:controlling_process(Socket, self()),
     erlang:send_after(?TIMER, self(), gc),
-    {ok, #server{socket = Socket, sec_id = SecID}}.
+    {ok, #server{socket = Socket, sec_id = SecID, sendto = SendTo}}.
 
 handle_call({stop, _Feed}, _, P) ->
     {stop, shutdown, stopped, P};
@@ -64,7 +65,7 @@ handle_cast(_Msg, State) ->
 
 handle_info({udp, _Socket, _Ip, _Port, <<>>}, State) ->
     {noreply, State};
-handle_info({udp, _Socket, _Ip, _Port, <<_Num:32/unsigned-little-integer, Bin/binary>>}, S = #server{sec_id = SecID}) ->
+handle_info({udp, _Socket, _Ip, _Port, <<_Num:32/unsigned-little-integer, Bin/binary>>}, S = #server{sec_id = SecID, sendto = Pid}) ->
 %    List = lists:reverse(lists:foldl(fun parse/2, [<<>>], [<<C:8>> || <<C:8>> <= Bin])),
     List_binaries = list_binaries(Bin),
     List = sort(List_binaries),
@@ -76,7 +77,7 @@ handle_info({udp, _Socket, _Ip, _Port, <<_Num:32/unsigned-little-integer, Bin/bi
 %	    case F of
 %		[_] ->
 %		    io:format("F : ~p~n", [F]),
-		    extract(F);
+		    extract(F, Pid);
 %		[] ->
 %		    ok
 %	    end;
@@ -86,7 +87,7 @@ handle_info({udp, _Socket, _Ip, _Port, <<_Num:32/unsigned-little-integer, Bin/bi
 		    L = template_snap(List),
 %		    case L of
 %			[_] ->
-			    extract(L);
+			    extract(L, Pid);
 %			[] ->
 %			    ok
 %		    end;
@@ -194,11 +195,10 @@ zip6_acc(Acc, [], _, _, _, _, _) ->
 zip6_acc(Acc, [X|Xs], [Y|Ys], [S|Ss], [R|Rs], [E|Es], [M|Ms]) ->
     zip6_acc([{X, Y, S, R, E, M}|Acc], Xs, Ys, Ss, Rs, Es, Ms).
 
-extract([]) ->
+extract([], _) ->
     ok;
-extract([H|T]) when is_tuple(H) andalso T == [] ->
-    fast_dispatcher:feed(H);
-extract([H|T]) when is_tuple(H) ->
-    %?D (H),
-    fast_dispatcher:feed(H),
-    extract(T).
+extract([H|T], Pid) when is_tuple(H) andalso T == [] ->
+    gen_server:cast(Pid, {feed, H});
+extract([H|T], Pid) when is_tuple(H) ->
+    gen_server:cast(Pid, {feed, H}),
+    extract(T, Pid).
